@@ -1,0 +1,27 @@
+name: Bot Actualizador de Cines
+
+on:
+  workflow_dispatch: # Para darle al botón "Run" manualmente
+  schedule:
+    - cron: '0 12 * * *' # Se ejecuta a las 12:00 todos los días
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v3
+
+      - name: Instalar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Instalar Librerías
+        run: pip install supabase geopy
+
+      - name: Ejecutar Script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python update_cines.py
