@@ -1,68 +1,74 @@
 import os
 import time
+import re
 from supabase import create_client
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 
-# 1. Configuración de Supabase
+# 1. Configuración
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(url, key)
+geolocator = Nominatim(user_agent="bot_cines_espana_ultra_v3")
 
-# 2. Configurar el buscador con un User Agent único
-geolocator = Nominatim(user_agent="bot_cines_espana_v2")
+def limpiar_nombre(nombre):
+    """Limpia el nombre del cine para facilitar la búsqueda"""
+    # 1. Quitar todo lo que esté entre paréntesis (ej: Cine de Verano)
+    nombre = re.sub(r'\(.*?\)', '', nombre)
+    # 2. Quitar términos legales o innecesarios
+    palabras_ruido = ['S.A.', 'S.L.', 'S.A.U.', 'MULTICINES', 'CINES', 'CINE']
+    for ruido in palabras_ruido:
+        nombre = nombre.replace(ruido, '')
+    # 3. Quitar espacios extra
+    return nombre.strip()
 
-def buscar_direccion_mejorada(nombre, provincia):
-    # Definimos tres niveles de búsqueda para "afinar el tiro"
+def buscar_direccion_ultra(nombre, provincia):
+    nombre_limpio = limpiar_nombre(nombre)
+    
+    # Intentos en cascada: de lo más específico a lo más general
     queries = [
-        f"{nombre}, {provincia}, España",       # 1. Intento más preciso
-        f"cine {nombre} {provincia}",           # 2. Intento descriptivo
-        f"{nombre} España"                      # 3. Intento desesperado
+        f"{nombre_limpio}, {provincia}, España", # Ej: "Liceo, Cordoba, España"
+        f"{nombre}, {provincia}, España",        # Por si el nombre original era mejor
+        f"{nombre_limpio} {provincia}",          # Búsqueda libre
     ]
     
+    # Si el nombre es muy largo, intentamos solo con las 3 primeras palabras
+    palabras = nombre_limpio.split()
+    if len(palabras) > 3:
+        queries.append(f"{' '.join(palabras[:3])} {provincia} España")
+
     for query in queries:
         try:
-            print(f"  Probando: {query}")
-            location = geolocator.geocode(query, addressdetails=True, timeout=10)
+            location = geolocator.geocode(query, timeout=10)
             if location:
-                # Priorizamos direcciones que contengan la provincia para evitar errores
                 return location.address
-        except (GeocoderTimedOut, GeocoderServiceError):
-            time.sleep(2) # Si hay error de conexión, esperamos un poco
+        except:
             continue
+        time.sleep(0.5) # Micro-pausa entre re-intentos de un mismo cine
     return None
 
 def main():
-    # Traemos 200 cines que tengan la dirección vacía
-    # Nota: Asegúrate de que en Supabase la columna 'direccion' sea NULL por defecto
+    # Seguimos con límite de 200 para evitar bloqueos por IP
     response = supabase.table("cines").select("id, nombre, ciudad").is_("direccion", "null").limit(200).execute()
     cines = response.data
 
     if not cines:
-        print("🎉 ¡Todos los cines tienen dirección o no quedan registros pendientes!")
+        print("No hay más cines por procesar.")
         return
 
-    print(f"🚀 Iniciando procesamiento de {len(cines)} cines...")
-
     for cine in cines:
-        id_cine = cine['id']
-        nombre = cine['nombre']
-        provincia = cine['ciudad'] # Según me indicas, aquí está la provincia
-
-        print(f"\n🔎 Buscando: {nombre} ({provincia})")
-        
-        direccion = buscar_direccion_mejorada(nombre, provincia)
+        print(f"Probando con: {cine['nombre']}...")
+        direccion = buscar_direccion_ultra(cine['nombre'], cine['ciudad'])
         
         if direccion:
-            supabase.table("cines").update({"direccion": direccion}).eq("id", id_cine).execute()
-            print(f"✅ Guardado: {direccion[:50]}...")
+            supabase.table("cines").update({"direccion": direccion}).eq("id", cine['id']).execute()
+            print(f"✅ ¡ÉXITO!: {direccion[:60]}...")
         else:
-            # Opcional: Marcar como 'No encontrado' para que el bot no lo procese mil veces
-            # supabase.table("cines").update({"direccion": "No encontrado"}).eq("id", id_cine).execute()
-            print(f"❌ Sin éxito tras varios intentos.")
+            # MARCAMOS COMO 'FALLIDO' para no re-intentar el mismo 1000 veces
+            # Esto es vital para que el bot avance a los siguientes
+            supabase.table("cines").update({"direccion": "Revision Manual"}).eq("id", cine['id']).execute()
+            print(f"❌ FALLO")
         
-        # Respetar el límite de 1 consulta por segundo de Nominatim
-        time.sleep(1.5)
+        time.sleep(1.2) # Respetar límite de Nominatim
 
 if __name__ == "__main__":
     main()
